@@ -7,7 +7,6 @@
     "cache",
     "semantic-cache",
     "openai",
-    "anthropic",
     "qdrant",
     "redis",
     "embeddings"
@@ -40,17 +39,11 @@
     "prepublishOnly": "npm run build"
   },
   "peerDependencies": {
-    "@anthropic-ai/sdk": ">=0.20.0",
     "@qdrant/js-client-rest": ">=1.8.0",
     "ioredis": ">=5.0.0",
     "openai": ">=4.0.0"
   },
-  "peerDependenciesMeta": {
-    "@anthropic-ai/sdk": { "optional": true },
-    "openai": { "optional": true }
-  },
   "devDependencies": {
-    "@anthropic-ai/sdk": "^0.20.0",
     "@qdrant/js-client-rest": "^1.8.0",
     "@types/node": "^20.0.0",
     "@typescript-eslint/eslint-plugin": "^7.0.0",

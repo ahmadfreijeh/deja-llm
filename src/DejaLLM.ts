@@ -3,8 +3,6 @@ import { randomUUID } from "crypto";
 import { RedisExactCache } from "./cache/RedisExactCache.js";
 import { RedisEmbeddingCache } from "./cache/RedisEmbeddingCache.js";
 import { OpenAIEmbeddings } from "./providers/embeddings/OpenAIEmbeddings.js";
-import { OpenAIChat } from "./providers/llm/OpenAIChat.js";
-import { AnthropicChat } from "./providers/llm/AnthropicChat.js";
 import { QdrantStore } from "./vector/QdrantStore.js";
 import { hashConversation, serializeConversation } from "./utils/hash.js";
 import { estimateSavingsUSD } from "./utils/cost.js";
@@ -14,10 +12,9 @@ import type {
   CacheResult,
   DejaLLMConfig,
   EmbeddingProvider,
-  LLMProvider,
   Logger,
 } from "./types.js";
-import { DejaValidationError, DejaConfigError } from "./types.js";
+import { DejaValidationError } from "./types.js";
 
 const DEFAULT_THRESHOLD = 0.92;
 const DEFAULT_REDIS_URL = "redis://localhost:6379";
@@ -28,7 +25,6 @@ export class DejaLLM {
   private embeddingCache: RedisEmbeddingCache;
   private vectorStore: QdrantStore;
   private embedding: EmbeddingProvider;
-  private llm: LLMProvider | undefined;
   private threshold: number;
   private failSilently: boolean;
   private logger: Logger | undefined;
@@ -41,29 +37,15 @@ export class DejaLLM {
     this.failSilently = config.failSilently ?? true;
     this.logger = config.logger;
 
-    // Build embedding provider
     this.embedding = isEmbeddingProvider(config.embedding)
       ? config.embedding
       : new OpenAIEmbeddings(config.embedding.apiKey, config.embedding.model);
 
-    // Build LLM provider (optional — only needed for mode 1)
-    if (config.llm) {
-      if (isLLMProvider(config.llm)) {
-        this.llm = config.llm;
-      } else if (config.llm.provider === "openai") {
-        this.llm = new OpenAIChat(config.llm.apiKey, config.llm.model);
-      } else if (config.llm.provider === "anthropic") {
-        this.llm = new AnthropicChat(config.llm.apiKey, config.llm.model);
-      }
-    }
-
-    // Build Redis clients
     const redisUrl = config.redis.url ?? DEFAULT_REDIS_URL;
     const keyPrefix = config.redis.keyPrefix ?? DEFAULT_KEY_PREFIX;
 
     this.exactCache = new RedisExactCache(redisUrl, keyPrefix, config.redis.ttl);
 
-    // Reuse the same underlying Redis connection for embedding cache
     const { Redis } = require("ioredis") as typeof import("ioredis");
     const redisClient = new Redis(redisUrl, { lazyConnect: true });
     this.embeddingCache = new RedisEmbeddingCache(
@@ -72,7 +54,6 @@ export class DejaLLM {
       config.redis.ttl,
     );
 
-    // Build Qdrant store — collection name encodes model + dimensions to catch model swaps
     const collectionName =
       config.qdrant.collectionName ??
       `deja__${this.embedding.model}__${this.embedding.dimensions}`.replace(/[^a-z0-9_]/gi, "_");
@@ -84,33 +65,11 @@ export class DejaLLM {
       ...(config.qdrant.ttl !== undefined ? { ttl: config.qdrant.ttl } : {}),
     });
 
-    // Ensure Qdrant collection exists before any request comes in
     this.ready = this.vectorStore.ensureCollection(this.embedding.dimensions).catch((err) => {
       this.logger?.warn("Failed to ensure Qdrant collection on startup", { err });
     });
   }
 
-  // Mode 1: library handles the full flow including the LLM call
-  async query(messages: ChatMessage[]): Promise<CacheResult> {
-    validate(messages);
-
-    if (!this.llm) {
-      throw new DejaConfigError(
-        "No LLM provider configured. Pass `llm` in config to use query(), or use check()/store() instead.",
-      );
-    }
-
-    const hit = await this.check(messages);
-    if (hit) return hit;
-
-    const startLLM = Date.now();
-    const response = await this.llm.complete(messages);
-    const llmCall = Date.now() - startLLM;
-
-    return this._store(messages, response, { llmCall });
-  }
-
-  // Mode 2a: just check the cache, return null on miss
   async check(messages: ChatMessage[]): Promise<CacheResult | null> {
     validate(messages);
     await this.ready;
@@ -132,11 +91,9 @@ export class DejaLLM {
         layer: "exact",
         similarity: undefined,
         cachedAt: undefined,
-        timings: { ...timings, total: Date.now() - start },
+        timings: { ...timings, writeBack: null, total: Date.now() - start },
         embeddingSkipped: true,
-        llmSkipped: true,
         embeddingModel: this.embedding.model,
-        llmModel: llmModel(this.config.llm),
         queryText: serialized,
         responseText: exact,
       });
@@ -149,7 +106,6 @@ export class DejaLLM {
 
     const embeddingSkipped = vector !== null && vector !== undefined;
 
-    // --- Embed if not cached ---
     if (!embeddingSkipped) {
       const t3 = Date.now();
       vector = await this.safeRun(() => this.embedding.embed(serialized));
@@ -175,11 +131,9 @@ export class DejaLLM {
         layer: "semantic",
         similarity: topHit.score,
         cachedAt: new Date(topHit.payload.cachedAt),
-        timings: { ...timings, total: Date.now() - start },
+        timings: { ...timings, writeBack: null, total: Date.now() - start },
         embeddingSkipped,
-        llmSkipped: true,
         embeddingModel: this.embedding.model,
-        llmModel: llmModel(this.config.llm) ?? undefined,
         queryText: serialized,
         responseText: topHit.payload.response,
       });
@@ -188,28 +142,13 @@ export class DejaLLM {
     return null;
   }
 
-  // Store a response after the user has called the LLM themselves
   async store(messages: ChatMessage[], response: string): Promise<CacheResult> {
     validate(messages);
-    return this._store(messages, response, { llmCall: null });
-  }
 
-  // Delete all expired Qdrant points
-  async vacuum(): Promise<number> {
-    return this.vectorStore.deleteExpired();
-  }
-
-  // Internal: write response back to all cache layers and return a result
-  private async _store(
-    messages: ChatMessage[],
-    response: string,
-    opts: { llmCall: number | null },
-  ): Promise<CacheResult> {
     const start = Date.now();
     const serialized = serializeConversation(messages);
     const hash = hashConversation(messages);
 
-    // Get or compute the embedding for write-back
     let vector = await this.safeRun(() => this.embeddingCache.get(hash));
     if (!vector) {
       vector = await this.safeRun(() => this.embedding.embed(serialized));
@@ -248,17 +187,18 @@ export class DejaLLM {
         embeddingCacheLookup: 0,
         embedding: null,
         semanticSearch: 0,
-        llmCall: opts.llmCall,
         writeBack,
         total: Date.now() - start,
       },
       embeddingSkipped: false,
-      llmSkipped: false,
       embeddingModel: this.embedding.model,
-      llmModel: llmModel(this.config.llm) ?? undefined,
       queryText: serialized,
       responseText: response,
     });
+  }
+
+  async vacuum(): Promise<number> {
+    return this.vectorStore.deleteExpired();
   }
 
   private async safeRun<T>(fn: () => Promise<T>): Promise<T | null> {
@@ -287,22 +227,8 @@ function validate(messages: ChatMessage[]): void {
   }
 }
 
-function isEmbeddingProvider(
-  v: DejaLLMConfig["embedding"],
-): v is import("./types.js").EmbeddingProvider {
-  return typeof (v as import("./types.js").EmbeddingProvider).embed === "function";
-}
-
-function isLLMProvider(
-  v: NonNullable<DejaLLMConfig["llm"]>,
-): v is import("./types.js").LLMProvider {
-  return typeof (v as import("./types.js").LLMProvider).complete === "function";
-}
-
-function llmModel(llm: DejaLLMConfig["llm"]): string | undefined {
-  if (!llm) return undefined;
-  if (isLLMProvider(llm)) return undefined;
-  return llm.model;
+function isEmbeddingProvider(v: DejaLLMConfig["embedding"]): v is EmbeddingProvider {
+  return typeof (v as EmbeddingProvider).embed === "function";
 }
 
 interface Timings {
@@ -310,19 +236,16 @@ interface Timings {
   embeddingCacheLookup: number;
   embedding: number | null;
   semanticSearch: number;
-  llmCall: number | null;
   writeBack: number | null;
   total: number;
 }
 
-function makeTimings(): Omit<Timings, "total"> {
+function makeTimings(): Omit<Timings, "writeBack" | "total"> {
   return {
     exactLookup: 0,
     embeddingCacheLookup: 0,
     embedding: null,
     semanticSearch: 0,
-    llmCall: null,
-    writeBack: null,
   };
 }
 
@@ -333,9 +256,7 @@ function buildResult(opts: {
   cachedAt: Date | undefined;
   timings: Timings;
   embeddingSkipped: boolean;
-  llmSkipped: boolean;
   embeddingModel: string;
-  llmModel: string | undefined;
   queryText: string;
   responseText: string;
 }): CacheResult {
@@ -347,14 +268,10 @@ function buildResult(opts: {
     latency: opts.timings,
     savings: {
       embeddingSkipped: opts.embeddingSkipped,
-      llmSkipped: opts.llmSkipped,
       estimatedUSD: estimateSavingsUSD({
         embeddingSkipped: opts.embeddingSkipped,
-        llmSkipped: opts.llmSkipped,
         embeddingModel: opts.embeddingModel,
-        llmModel: opts.llmModel,
         queryText: opts.queryText,
-        responseText: opts.responseText,
       }),
     },
   };

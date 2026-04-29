@@ -9,10 +9,6 @@ export interface EmbeddingProvider {
   readonly model: string;
 }
 
-export interface LLMProvider {
-  complete(messages: ChatMessage[]): Promise<string>;
-}
-
 export interface VectorHit {
   id: string;
   score: number;
@@ -50,13 +46,11 @@ export interface CacheResult {
     embeddingCacheLookup: number;
     embedding: number | null;
     semanticSearch: number;
-    llmCall: number | null;
     writeBack: number | null;
     total: number;
   };
   savings: {
     embeddingSkipped: boolean;
-    llmSkipped: boolean;
     estimatedUSD: number | null;
   };
 }
@@ -69,18 +63,6 @@ export interface Logger {
 
 export interface OpenAIEmbeddingConfig {
   provider: "openai";
-  apiKey: string;
-  model?: string;
-}
-
-export interface OpenAILLMConfig {
-  provider: "openai";
-  apiKey: string;
-  model?: string;
-}
-
-export interface AnthropicLLMConfig {
-  provider: "anthropic";
   apiKey: string;
   model?: string;
 }
@@ -98,7 +80,6 @@ export interface DejaLLMConfig {
     ttl?: number;
   };
   embedding: EmbeddingProvider | OpenAIEmbeddingConfig;
-  llm?: LLMProvider | OpenAILLMConfig | AnthropicLLMConfig;
   threshold?: number;
   failSilently?: boolean;
   logger?: Logger;
@@ -108,12 +89,5 @@ export class DejaValidationError extends Error {
   constructor(message: string) {
     super(message);
     this.name = "DejaValidationError";
-  }
-}
-
-export class DejaConfigError extends Error {
-  constructor(message: string) {
-    super(message);
-    this.name = "DejaConfigError";
   }
 }
