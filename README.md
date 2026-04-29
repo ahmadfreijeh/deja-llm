@@ -12,7 +12,7 @@ Think of it as GPTCache for Node.js. No vendor lock-in, fully self-hostable, bui
 
 ## How it works
 
-Every query passes through three layers in order. Each layer is cheaper and faster than the next — the LLM is only called on a full miss.
+Every query passes through two cache layers before falling through to your LLM. You own the LLM call — the library is purely a caching layer.
 
 ```
 Query
@@ -27,8 +27,8 @@ Layer 2 — Qdrant semantic search
   If similarity >= threshold → return cached response
   │ miss
   ▼
-Layer 3 — LLM call
-  Call the LLM, save the response back to Redis and Qdrant
+Your LLM call
+  Call the LLM however you want, then store the response back into the cache
 ```
 
 Embeddings are also cached in Redis so the same conversation is never embedded twice.
@@ -40,20 +40,7 @@ Every result includes which layer it hit on, similarity score, full latency brea
 ## Install
 
 ```bash
-npm install deja-llm
-```
-
-Install the providers you need as peer dependencies:
-
-```bash
-# If using OpenAI (embeddings + LLM)
-npm install openai
-
-# If using Anthropic (LLM only)
-npm install @anthropic-ai/sdk
-
-# Always required
-npm install ioredis @qdrant/js-client-rest
+npm install deja-llm ioredis @qdrant/js-client-rest openai
 ```
 
 You also need a running Redis and Qdrant instance. The quickest way to get both locally:
@@ -67,33 +54,6 @@ docker run -d -p 6333:6333 qdrant/qdrant
 
 ## Usage
 
-### Mode 1 — Library handles everything
-
-Pass your messages in and get a response back. The library checks the cache, calls the LLM on a miss, and stores the result automatically.
-
-```ts
-import { DejaLLM } from "deja-llm";
-
-const deja = new DejaLLM({
-  redis: { url: "redis://localhost:6379" },
-  qdrant: { url: "http://localhost:6333" },
-  embedding: { provider: "openai", apiKey: process.env.OPENAI_API_KEY },
-  llm: { provider: "anthropic", apiKey: process.env.ANTHROPIC_API_KEY },
-});
-
-const result = await deja.query([
-  { role: "system", content: "You are a helpful assistant." },
-  { role: "user", content: "What is the capital of France?" },
-]);
-
-console.log(result.response);  // "Paris."
-console.log(result.layer);     // "exact" | "semantic" | false
-```
-
-### Mode 2 — You handle the LLM call
-
-Use this when you need full control over the LLM call — custom parameters, streaming after a miss, your own SDK setup, etc.
-
 ```ts
 import { DejaLLM } from "deja-llm";
 import Anthropic from "@anthropic-ai/sdk";
@@ -102,7 +62,6 @@ const deja = new DejaLLM({
   redis: { url: "redis://localhost:6379" },
   qdrant: { url: "http://localhost:6333" },
   embedding: { provider: "openai", apiKey: process.env.OPENAI_API_KEY },
-  // no llm: here
 });
 
 const anthropic = new Anthropic();
@@ -114,11 +73,12 @@ const messages = [
 // Check cache first
 const hit = await deja.check(messages);
 if (hit) {
-  console.log(hit.response);  // served from cache
+  console.log(hit.response); // served from cache
+  console.log(hit.layer);    // "exact" | "semantic"
   return;
 }
 
-// Cache miss — call the LLM yourself
+// Cache miss — call the LLM yourself however you want
 const res = await anthropic.messages.create({
   model: "claude-sonnet-4-6",
   max_tokens: 1024,
@@ -130,17 +90,36 @@ const response = res.content[0].text;
 await deja.store(messages, response);
 ```
 
+Works with any LLM — OpenAI, Anthropic, Mistral, local models, anything that returns a string.
+
+### Streaming
+
+`check()` first, stream on a miss, then `store()` once the stream is complete:
+
+```ts
+const hit = await deja.check(messages);
+if (hit) return hit.response;
+
+let response = "";
+const stream = await anthropic.messages.stream({ model: "claude-sonnet-4-6", max_tokens: 1024, messages });
+for await (const chunk of stream) {
+  if (chunk.type === "content_block_delta") response += chunk.delta.text;
+}
+
+await deja.store(messages, response);
+```
+
 ---
 
 ## Result object
 
-Every method returns a `CacheResult`:
+Both `check()` and `store()` return a `CacheResult`:
 
 ```ts
 {
   response: string;
 
-  // Which layer answered. false means the LLM was called.
+  // Which layer answered. false means it was a miss (returned by store()).
   layer: "exact" | "semantic" | false;
 
   // Only present on a semantic hit
@@ -154,15 +133,13 @@ Every method returns a `CacheResult`:
     embeddingCacheLookup: number; // ms
     embedding: number | null;     // null if served from embedding cache
     semanticSearch: number;       // ms
-    llmCall: number | null;       // null on cache hit
     writeBack: number | null;     // null on cache hit
     total: number;                // ms
   };
 
   savings: {
     embeddingSkipped: boolean;
-    llmSkipped: boolean;
-    estimatedUSD: number | null;  // null if model pricing unknown
+    estimatedUSD: number | null;  // embedding cost saved; null if model unknown
   };
 }
 ```
@@ -176,16 +153,16 @@ Every method returns a `CacheResult`:
 ```ts
 const deja = new DejaLLM({
   redis: {
-    url: "redis://localhost:6379",  // default
-    ttl: 3600,                      // seconds; strongly recommended in production
-    keyPrefix: "deja:",             // default
+    url: "redis://localhost:6379",   // default
+    ttl: 3600,                       // seconds; strongly recommended in production
+    keyPrefix: "deja:",              // default
   },
 
   qdrant: {
     url: "http://localhost:6333",
-    apiKey: "...",                  // for Qdrant Cloud
-    collectionName: "my_cache",     // auto-generated from model name if omitted
-    ttl: 86400,                     // seconds; omit for no expiry
+    apiKey: "...",                   // for Qdrant Cloud
+    collectionName: "my_cache",      // auto-generated from model name if omitted
+    ttl: 86400,                      // seconds; omit for no expiry
   },
 
   embedding: {
@@ -194,24 +171,18 @@ const deja = new DejaLLM({
     model: "text-embedding-3-small", // default
   },
 
-  llm: {
-    provider: "anthropic",           // or "openai"
-    apiKey: "...",
-    model: "claude-sonnet-4-6",
-  },
-
-  threshold: 0.92,      // semantic similarity threshold, default 0.92
-  failSilently: true,   // on cache errors, fall through to LLM — default true
-  logger: console,      // any object with debug/warn/error methods
+  threshold: 0.92,     // semantic similarity threshold, default 0.92
+  failSilently: true,  // on cache errors, fall through silently — default true
+  logger: console,     // any object with debug/warn/error methods
 });
 ```
 
-### Bring your own providers
+### Bring your own embedding provider
 
-Both `embedding` and `llm` accept a custom provider instance directly, as long as it implements the interface:
+`embedding` accepts a custom provider instance directly, as long as it implements the interface:
 
 ```ts
-import type { EmbeddingProvider, LLMProvider } from "deja-llm";
+import type { EmbeddingProvider } from "deja-llm";
 
 class MyEmbeddings implements EmbeddingProvider {
   readonly model = "my-model";
@@ -221,7 +192,6 @@ class MyEmbeddings implements EmbeddingProvider {
 
 const deja = new DejaLLM({
   embedding: new MyEmbeddings(),
-  llm: new MyLLM(),
   // ...
 });
 ```
@@ -253,10 +223,6 @@ Embedding the same conversation twice wastes money. The embedding vector is stor
 **Why the Qdrant collection name encodes the model**
 
 If you switch embedding models, the existing vectors become incompatible. Encoding the model name and dimensions in the collection name (`deja__text_embedding_3_small__1536`) means a model change automatically creates a new collection rather than silently searching with mismatched vectors.
-
-**Streaming**
-
-Mode 2 supports streaming — call `check()` first, and if it returns `null`, stream from the LLM yourself, then call `store()` once the stream is complete.
 
 **Known limitation: ambiguous follow-up questions**
 
