@@ -1,14 +1,14 @@
+import { Redis } from "ioredis";
 import type { ExactCache } from "../types.js";
 
 export class RedisExactCache implements ExactCache {
-  private client: import("ioredis").Redis;
+  private client: Redis;
   private prefix: string;
   private defaultTTL: number | undefined;
 
   constructor(url = "redis://localhost:6379", prefix = "deja:", ttl?: number) {
     this.prefix = prefix;
     this.defaultTTL = ttl;
-    const { Redis } = require("ioredis") as typeof import("ioredis");
     this.client = new Redis(url, { lazyConnect: true });
   }
 

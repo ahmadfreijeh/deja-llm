@@ -1,17 +1,15 @@
+import OpenAI from "openai";
 import type { EmbeddingProvider } from "../../types.js";
 
 export class OpenAIEmbeddings implements EmbeddingProvider {
   readonly model: string;
   readonly dimensions: number;
 
-  private client: import("openai").OpenAI;
+  private client: OpenAI;
 
   constructor(apiKey: string, model = "text-embedding-3-small") {
     this.model = model;
     this.dimensions = dimensionsForModel(model);
-
-    // Lazy import to keep openai a peer dep
-    const { OpenAI } = require("openai") as typeof import("openai");
     this.client = new OpenAI({ apiKey });
   }
 

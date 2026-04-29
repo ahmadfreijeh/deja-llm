@@ -1,17 +1,19 @@
+import { QdrantClient } from "@qdrant/js-client-rest";
 import type { VectorStore, VectorHit, VectorPayload } from "../types.js";
 
 export class QdrantStore implements VectorStore {
-  private client: import("@qdrant/js-client-rest").QdrantClient;
+  private client: QdrantClient;
   private collectionName: string;
   private ttl: number | undefined;
 
-  constructor(opts: { url: string; apiKey?: string; collectionName: string; ttl?: number }) {
+  constructor(opts: {
+    url: string;
+    apiKey?: string;
+    collectionName: string;
+    ttl?: number;
+  }) {
     this.collectionName = opts.collectionName;
     this.ttl = opts.ttl;
-
-    const { QdrantClient } =
-      require("@qdrant/js-client-rest") as typeof import("@qdrant/js-client-rest");
-
     this.client = new QdrantClient(
       opts.apiKey ? { url: opts.url, apiKey: opts.apiKey } : { url: opts.url },
     );
@@ -67,7 +69,6 @@ export class QdrantStore implements VectorStore {
         must: [{ key: "expiresAt", range: { lt: now } }],
       },
     });
-
     return result.status === "completed" ? 1 : 0;
   }
 

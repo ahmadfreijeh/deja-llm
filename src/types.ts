@@ -82,6 +82,10 @@ export interface DejaLLMConfig {
   embedding: EmbeddingProvider | OpenAIEmbeddingConfig;
   threshold?: number;
   failSilently?: boolean;
+  // Optional overrides for testing or custom implementations
+  _exactCache?: ExactCache;
+  _vectorStore?: VectorStore;
+  _embeddingCache?: { get(key: string): Promise<number[] | null>; set(key: string, vector: number[]): Promise<void> };
   logger?: Logger;
 }
 

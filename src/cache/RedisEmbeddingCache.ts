@@ -1,9 +1,11 @@
+import type { Redis } from "ioredis";
+
 export class RedisEmbeddingCache {
-  private client: import("ioredis").Redis;
+  private client: Redis;
   private prefix: string;
   private defaultTTL: number | undefined;
 
-  constructor(client: import("ioredis").Redis, prefix = "deja:emb:", ttl?: number) {
+  constructor(client: Redis, prefix = "deja:emb:", ttl?: number) {
     this.client = client;
     this.prefix = prefix;
     this.defaultTTL = ttl;

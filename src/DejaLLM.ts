@@ -12,6 +12,8 @@ import type {
   CacheResult,
   DejaLLMConfig,
   EmbeddingProvider,
+  ExactCache,
+  VectorStore,
   Logger,
 } from "./types.js";
 import { DejaValidationError } from "./types.js";
@@ -21,14 +23,15 @@ const DEFAULT_REDIS_URL = "redis://localhost:6379";
 const DEFAULT_KEY_PREFIX = "deja:";
 
 export class DejaLLM {
-  private exactCache: RedisExactCache;
-  private embeddingCache: RedisEmbeddingCache;
-  private vectorStore: QdrantStore;
+  private exactCache: ExactCache;
+  private embeddingCache: { get(key: string): Promise<number[] | null>; set(key: string, vector: number[]): Promise<void> };
+  private vectorStore: VectorStore;
   private embedding: EmbeddingProvider;
   private threshold: number;
   private failSilently: boolean;
   private logger: Logger | undefined;
   private config: DejaLLMConfig;
+  private qdrantTTL: number | undefined;
   private ready: Promise<void>;
 
   constructor(config: DejaLLMConfig) {
@@ -36,6 +39,7 @@ export class DejaLLM {
     this.threshold = config.threshold ?? DEFAULT_THRESHOLD;
     this.failSilently = config.failSilently ?? true;
     this.logger = config.logger;
+    this.qdrantTTL = config.qdrant.ttl;
 
     this.embedding = isEmbeddingProvider(config.embedding)
       ? config.embedding
@@ -44,30 +48,36 @@ export class DejaLLM {
     const redisUrl = config.redis.url ?? DEFAULT_REDIS_URL;
     const keyPrefix = config.redis.keyPrefix ?? DEFAULT_KEY_PREFIX;
 
-    this.exactCache = new RedisExactCache(redisUrl, keyPrefix, config.redis.ttl);
+    this.exactCache = config._exactCache ?? new RedisExactCache(redisUrl, keyPrefix, config.redis.ttl);
 
-    const { Redis } = require("ioredis") as typeof import("ioredis");
-    const redisClient = new Redis(redisUrl, { lazyConnect: true });
-    this.embeddingCache = new RedisEmbeddingCache(
-      redisClient,
-      `${keyPrefix}emb:`,
-      config.redis.ttl,
-    );
+    if (config._embeddingCache) {
+      this.embeddingCache = config._embeddingCache;
+    } else {
+      const { Redis } = require("ioredis") as typeof import("ioredis");
+      const redisClient = new Redis(redisUrl, { lazyConnect: true });
+      this.embeddingCache = new RedisEmbeddingCache(redisClient, `${keyPrefix}emb:`, config.redis.ttl);
+    }
 
-    const collectionName =
-      config.qdrant.collectionName ??
-      `deja__${this.embedding.model}__${this.embedding.dimensions}`.replace(/[^a-z0-9_]/gi, "_");
+    if (config._vectorStore) {
+      this.vectorStore = config._vectorStore;
+      this.ready = Promise.resolve();
+    } else {
+      const collectionName =
+        config.qdrant.collectionName ??
+        `deja__${this.embedding.model}__${this.embedding.dimensions}`.replace(/[^a-z0-9_]/gi, "_");
 
-    this.vectorStore = new QdrantStore({
-      url: config.qdrant.url,
-      ...(config.qdrant.apiKey ? { apiKey: config.qdrant.apiKey } : {}),
-      collectionName,
-      ...(config.qdrant.ttl !== undefined ? { ttl: config.qdrant.ttl } : {}),
-    });
+      const qdrantStore = new QdrantStore({
+        url: config.qdrant.url,
+        ...(config.qdrant.apiKey ? { apiKey: config.qdrant.apiKey } : {}),
+        collectionName,
+        ...(config.qdrant.ttl !== undefined ? { ttl: config.qdrant.ttl } : {}),
+      });
 
-    this.ready = this.vectorStore.ensureCollection(this.embedding.dimensions).catch((err) => {
-      this.logger?.warn("Failed to ensure Qdrant collection on startup", { err });
-    });
+      this.vectorStore = qdrantStore;
+      this.ready = qdrantStore.ensureCollection(this.embedding.dimensions).catch((err) => {
+        this.logger?.warn("Failed to ensure Qdrant collection on startup", { err });
+      });
+    }
   }
 
   async check(messages: ChatMessage[]): Promise<CacheResult | null> {
@@ -167,7 +177,7 @@ export class DejaLLM {
               response,
               query: serialized,
               cachedAt: Date.now(),
-              expiresAt: this.vectorStore.expiresAt(),
+              expiresAt: this.qdrantTTL ? Date.now() + this.qdrantTTL * 1000 : null,
             }),
           )
         : Promise.resolve(),
