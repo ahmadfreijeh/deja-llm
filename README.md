@@ -6,6 +6,8 @@ The name is a pun on *déjà vu* — the library recognizes questions it has see
 
 Think of it as GPTCache for Node.js. No vendor lock-in, fully self-hostable, built for production.
 
+**Why does this exist?** The Node.js ecosystem has no proper solution for this. The closest is [@upstash/semantic-cache](https://github.com/upstash/semantic-cache) but it is a fundamentally different concept — it only does semantic similarity matching and is locked to Upstash's hosted infrastructure. `deja-llm` adds an exact-match layer before the semantic search (so repeated identical queries cost nothing), caches the embeddings themselves to avoid re-embedding, is fully self-hostable with your own Redis and Qdrant instances, and returns full observability on every result including latency breakdown and estimated cost saved.
+
 ---
 
 ## How it works
