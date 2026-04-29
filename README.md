@@ -171,11 +171,13 @@ Every method returns a `CacheResult`:
 
 ## Configuration
 
+> **Production warning:** Always set `redis.ttl` in production. The Redis exact cache stores the full serialized conversation as the value — without a TTL, the cache grows unbounded as unique conversations accumulate. A recommended pattern is a short TTL on Redis (e.g. 3600s) to catch hot repeated queries, and a longer TTL on Qdrant (e.g. 86400s) for semantic matching over a longer window.
+
 ```ts
 const deja = new DejaLLM({
   redis: {
     url: "redis://localhost:6379",  // default
-    ttl: 3600,                      // seconds; omit for no expiry
+    ttl: 3600,                      // seconds; strongly recommended in production
     keyPrefix: "deja:",             // default
   },
 
