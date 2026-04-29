@@ -1,6 +1,9 @@
 import { QdrantClient } from "@qdrant/js-client-rest";
 import type { VectorStore, VectorHit, VectorPayload } from "../types.js";
 
+// Sentinel value used when no TTL is set — far enough in the future to never expire
+const NO_EXPIRY = Number.MAX_SAFE_INTEGER;
+
 export class QdrantStore implements VectorStore {
   private client: QdrantClient;
   private collectionName: string;
@@ -37,14 +40,7 @@ export class QdrantStore implements VectorStore {
       limit: 1,
       score_threshold: threshold,
       filter: {
-        must: [
-          {
-            should: [
-              { key: "expiresAt", is_null: { is_null: true } },
-              { key: "expiresAt", range: { gt: now } },
-            ],
-          },
-        ],
+        must: [{ key: "expiresAt", range: { gt: now } }],
       },
       with_payload: true,
     });
@@ -72,8 +68,7 @@ export class QdrantStore implements VectorStore {
     return result.status === "completed" ? 1 : 0;
   }
 
-  expiresAt(): number | null {
-    if (!this.ttl) return null;
-    return Date.now() + this.ttl * 1000;
+  expiresAt(): number {
+    return this.ttl ? Date.now() + this.ttl * 1000 : NO_EXPIRY;
   }
 }

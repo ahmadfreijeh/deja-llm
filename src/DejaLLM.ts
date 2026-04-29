@@ -177,7 +177,7 @@ export class DejaLLM {
               response,
               query: serialized,
               cachedAt: Date.now(),
-              expiresAt: this.qdrantTTL ? Date.now() + this.qdrantTTL * 1000 : null,
+              expiresAt: this.qdrantTTL ? Date.now() + this.qdrantTTL * 1000 : Number.MAX_SAFE_INTEGER,
             }),
           )
         : Promise.resolve(),

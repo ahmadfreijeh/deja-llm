@@ -173,7 +173,7 @@ describe("DejaLLM", () => {
         {
           id: "abc",
           score: 0.95,
-          payload: { response: "4", query: "2+2", cachedAt: Date.now(), expiresAt: null },
+          payload: { response: "4", query: "2+2", cachedAt: Date.now(), expiresAt: Number.MAX_SAFE_INTEGER },
         },
       ];
       const deja = new DejaLLM(makeConfig(embedding, exactCache, mockVectorStore(semanticHits), embeddingCache));
@@ -192,7 +192,7 @@ describe("DejaLLM", () => {
         {
           id: "abc",
           score: 0.97,
-          payload: { response: "Berlin", query: "capital of Germany", cachedAt, expiresAt: null },
+          payload: { response: "Berlin", query: "capital of Germany", cachedAt, expiresAt: Number.MAX_SAFE_INTEGER },
         },
       ];
       const deja = new DejaLLM(makeConfig(embedding, exactCache, mockVectorStore(semanticHits), embeddingCache));

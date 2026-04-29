@@ -19,7 +19,7 @@ export interface VectorPayload extends Record<string, unknown> {
   response: string;
   query: string;
   cachedAt: number;
-  expiresAt: number | null;
+  expiresAt: number;
 }
 
 export interface VectorStore {
