@@ -30,6 +30,10 @@ export class QdrantStore implements VectorStore {
         vectors: { size: dimensions, distance: "Cosine" },
       });
     }
+    await this.client.createPayloadIndex(this.collectionName, {
+      field_name: "expiresAt",
+      field_schema: "integer",
+    });
   }
 
   async search(vector: number[], threshold: number): Promise<VectorHit[]> {
