@@ -6,6 +6,7 @@ import { OpenAIEmbeddings } from "./providers/embeddings/OpenAIEmbeddings.js";
 import { QdrantStore } from "./vector/QdrantStore.js";
 import { hashConversation, serializeConversation } from "./utils/hash.js";
 import { estimateSavingsUSD } from "./utils/cost.js";
+import { Stats } from "./Stats.js";
 
 import type {
   ChatMessage,
@@ -15,8 +16,10 @@ import type {
   ExactCache,
   VectorStore,
   Logger,
+  Hooks,
 } from "./types.js";
 import { DejaValidationError } from "./types.js";
+import type { StatsSnapshot } from "./Stats.js";
 
 const DEFAULT_THRESHOLD = 0.92;
 const DEFAULT_REDIS_URL = "redis://localhost:6379";
@@ -24,22 +27,29 @@ const DEFAULT_KEY_PREFIX = "deja:";
 
 export class DejaLLM {
   private exactCache: ExactCache;
-  private embeddingCache: { get(key: string): Promise<number[] | null>; set(key: string, vector: number[]): Promise<void> };
+  private embeddingCache: {
+    get(key: string): Promise<number[] | null>;
+    set(key: string, vector: number[]): Promise<void>;
+  };
   private vectorStore: VectorStore;
   private embedding: EmbeddingProvider;
   private threshold: number;
   private failSilently: boolean;
   private logger: Logger | undefined;
+  private hooks: Hooks | undefined;
   private config: DejaLLMConfig;
   private qdrantTTL: number | undefined;
   private ready: Promise<void>;
+  private _stats: Stats;
 
   constructor(config: DejaLLMConfig) {
     this.config = config;
     this.threshold = config.threshold ?? DEFAULT_THRESHOLD;
     this.failSilently = config.failSilently ?? true;
     this.logger = config.logger;
+    this.hooks = config.hooks;
     this.qdrantTTL = config.qdrant.ttl;
+    this._stats = new Stats();
 
     this.embedding = isEmbeddingProvider(config.embedding)
       ? config.embedding
@@ -48,14 +58,19 @@ export class DejaLLM {
     const redisUrl = config.redis.url ?? DEFAULT_REDIS_URL;
     const keyPrefix = config.redis.keyPrefix ?? DEFAULT_KEY_PREFIX;
 
-    this.exactCache = config._exactCache ?? new RedisExactCache(redisUrl, keyPrefix, config.redis.ttl);
+    this.exactCache =
+      config._exactCache ?? new RedisExactCache(redisUrl, keyPrefix, config.redis.ttl);
 
     if (config._embeddingCache) {
       this.embeddingCache = config._embeddingCache;
     } else {
       const { Redis } = require("ioredis") as typeof import("ioredis");
       const redisClient = new Redis(redisUrl, { lazyConnect: true });
-      this.embeddingCache = new RedisEmbeddingCache(redisClient, `${keyPrefix}emb:`, config.redis.ttl);
+      this.embeddingCache = new RedisEmbeddingCache(
+        redisClient,
+        `${keyPrefix}emb:`,
+        config.redis.ttl,
+      );
     }
 
     if (config._vectorStore) {
@@ -96,7 +111,7 @@ export class DejaLLM {
 
     if (exact !== null && exact !== undefined) {
       this.logger?.debug("Cache hit: exact", { hash });
-      return buildResult({
+      const result = buildResult({
         response: exact,
         layer: "exact",
         similarity: undefined,
@@ -107,6 +122,9 @@ export class DejaLLM {
         queryText: serialized,
         responseText: exact,
       });
+      this._stats.recordExactHit(result.savings.estimatedUSD);
+      this.hooks?.onHit?.(result);
+      return result;
     }
 
     // --- Embedding cache check ---
@@ -136,7 +154,7 @@ export class DejaLLM {
     const topHit = hits?.[0];
     if (topHit) {
       this.logger?.debug("Cache hit: semantic", { score: topHit.score });
-      return buildResult({
+      const result = buildResult({
         response: topHit.payload.response,
         layer: "semantic",
         similarity: topHit.score,
@@ -147,8 +165,13 @@ export class DejaLLM {
         queryText: serialized,
         responseText: topHit.payload.response,
       });
+      this._stats.recordSemanticHit(result.savings.estimatedUSD);
+      this.hooks?.onHit?.(result);
+      return result;
     }
 
+    this._stats.recordMiss();
+    this.hooks?.onMiss?.();
     return null;
   }
 
@@ -175,9 +198,11 @@ export class DejaLLM {
         ? this.safeRun(() =>
             this.vectorStore.upsert(randomUUID(), vector!, {
               response,
-              query: serialized,
+              query: hash,
               cachedAt: Date.now(),
-              expiresAt: this.qdrantTTL ? Date.now() + this.qdrantTTL * 1000 : Number.MAX_SAFE_INTEGER,
+              expiresAt: this.qdrantTTL
+                ? Date.now() + this.qdrantTTL * 1000
+                : Number.MAX_SAFE_INTEGER,
             }),
           )
         : Promise.resolve(),
@@ -187,7 +212,7 @@ export class DejaLLM {
 
     this.logger?.debug("Stored response in cache", { hash });
 
-    return buildResult({
+    const result = buildResult({
       response,
       layer: false,
       similarity: undefined,
@@ -205,6 +230,17 @@ export class DejaLLM {
       queryText: serialized,
       responseText: response,
     });
+
+    this.hooks?.onStore?.(result);
+    return result;
+  }
+
+  stats(): StatsSnapshot {
+    return this._stats.snapshot();
+  }
+
+  resetStats(): void {
+    this._stats.reset();
   }
 
   async vacuum(): Promise<number> {

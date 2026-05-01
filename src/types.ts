@@ -67,6 +67,12 @@ export interface OpenAIEmbeddingConfig {
   model?: string;
 }
 
+export interface Hooks {
+  onHit?: (result: CacheResult) => void;
+  onMiss?: () => void;
+  onStore?: (result: CacheResult) => void;
+}
+
 export interface DejaLLMConfig {
   redis: {
     url?: string;
@@ -87,6 +93,7 @@ export interface DejaLLMConfig {
   _vectorStore?: VectorStore;
   _embeddingCache?: { get(key: string): Promise<number[] | null>; set(key: string, vector: number[]): Promise<void> };
   logger?: Logger;
+  hooks?: Hooks;
 }
 
 export class DejaValidationError extends Error {

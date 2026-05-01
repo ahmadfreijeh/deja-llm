@@ -311,4 +311,155 @@ describe("DejaLLM", () => {
       expect(vectorStore.deleteExpired).toHaveBeenCalledTimes(1);
     });
   });
+
+  // --- stats() ---
+
+  describe("stats()", () => {
+    it("starts with zero requests", () => {
+      const deja = new DejaLLM(makeConfig(embedding, exactCache, vectorStore, embeddingCache));
+      const snap = deja.stats();
+      expect(snap.requests).toBe(0);
+      expect(snap.hits.exact).toBe(0);
+      expect(snap.hits.semantic).toBe(0);
+      expect(snap.hits.miss).toBe(0);
+      expect(snap.hitRate).toBe(0);
+      expect(snap.estimatedUSDSaved).toBe(0);
+    });
+
+    it("records a miss on a cache miss", async () => {
+      const deja = new DejaLLM(makeConfig(embedding, exactCache, vectorStore, embeddingCache));
+      await deja.check([{ role: "user", content: "What is 2+2?" }]);
+      const snap = deja.stats();
+      expect(snap.requests).toBe(1);
+      expect(snap.hits.miss).toBe(1);
+      expect(snap.hits.exact).toBe(0);
+      expect(snap.hits.semantic).toBe(0);
+      expect(snap.hitRate).toBe(0);
+    });
+
+    it("records an exact hit after store + check", async () => {
+      const deja = new DejaLLM(makeConfig(embedding, exactCache, vectorStore, embeddingCache));
+      const messages = [{ role: "user" as const, content: "What is 2+2?" }];
+      await deja.store(messages, "4");
+      await deja.check(messages);
+      const snap = deja.stats();
+      expect(snap.requests).toBe(1);
+      expect(snap.hits.exact).toBe(1);
+      expect(snap.hits.miss).toBe(0);
+      expect(snap.hitRate).toBe(100);
+    });
+
+    it("records a semantic hit", async () => {
+      const semanticHits: VectorHit[] = [
+        {
+          id: "abc",
+          score: 0.95,
+          payload: { response: "4", query: "hash", cachedAt: Date.now(), expiresAt: Number.MAX_SAFE_INTEGER },
+        },
+      ];
+      const deja = new DejaLLM(makeConfig(embedding, exactCache, mockVectorStore(semanticHits), embeddingCache));
+      await deja.check([{ role: "user", content: "What is two plus two?" }]);
+      const snap = deja.stats();
+      expect(snap.requests).toBe(1);
+      expect(snap.hits.semantic).toBe(1);
+      expect(snap.hits.exact).toBe(0);
+      expect(snap.hitRate).toBe(100);
+    });
+
+    it("calculates hitRate correctly across mixed results", async () => {
+      const deja = new DejaLLM(makeConfig(embedding, exactCache, vectorStore, embeddingCache));
+      const messages = [{ role: "user" as const, content: "Cached question" }];
+      await deja.store(messages, "Cached answer");
+      await deja.check(messages); // exact hit
+      await deja.check([{ role: "user", content: "Unknown question" }]); // miss
+      const snap = deja.stats();
+      expect(snap.requests).toBe(2);
+      expect(snap.hits.exact).toBe(1);
+      expect(snap.hits.miss).toBe(1);
+      expect(snap.hitRate).toBe(50);
+    });
+  });
+
+  // --- resetStats() ---
+
+  describe("resetStats()", () => {
+    it("resets all counters to zero", async () => {
+      const deja = new DejaLLM(makeConfig(embedding, exactCache, vectorStore, embeddingCache));
+      const messages = [{ role: "user" as const, content: "Hello" }];
+      await deja.store(messages, "Hi");
+      await deja.check(messages);
+      await deja.check([{ role: "user", content: "Unknown" }]);
+      deja.resetStats();
+      const snap = deja.stats();
+      expect(snap.requests).toBe(0);
+      expect(snap.hits.exact).toBe(0);
+      expect(snap.hits.semantic).toBe(0);
+      expect(snap.hits.miss).toBe(0);
+      expect(snap.hitRate).toBe(0);
+      expect(snap.estimatedUSDSaved).toBe(0);
+    });
+  });
+
+  // --- hooks ---
+
+  describe("hooks", () => {
+    it("calls onHit with the result on an exact hit", async () => {
+      const onHit = vi.fn();
+      const deja = new DejaLLM({ ...makeConfig(embedding, exactCache, vectorStore, embeddingCache), hooks: { onHit } });
+      const messages = [{ role: "user" as const, content: "What is 2+2?" }];
+      await deja.store(messages, "4");
+      await deja.check(messages);
+      expect(onHit).toHaveBeenCalledTimes(1);
+      expect(onHit.mock.calls[0][0].layer).toBe("exact");
+    });
+
+    it("calls onHit with the result on a semantic hit", async () => {
+      const onHit = vi.fn();
+      const semanticHits: VectorHit[] = [
+        {
+          id: "abc",
+          score: 0.95,
+          payload: { response: "4", query: "hash", cachedAt: Date.now(), expiresAt: Number.MAX_SAFE_INTEGER },
+        },
+      ];
+      const deja = new DejaLLM({
+        ...makeConfig(embedding, exactCache, mockVectorStore(semanticHits), embeddingCache),
+        hooks: { onHit },
+      });
+      await deja.check([{ role: "user", content: "Two plus two?" }]);
+      expect(onHit).toHaveBeenCalledTimes(1);
+      expect(onHit.mock.calls[0][0].layer).toBe("semantic");
+    });
+
+    it("calls onMiss on a cache miss", async () => {
+      const onMiss = vi.fn();
+      const deja = new DejaLLM({ ...makeConfig(embedding, exactCache, vectorStore, embeddingCache), hooks: { onMiss } });
+      await deja.check([{ role: "user", content: "Unknown?" }]);
+      expect(onMiss).toHaveBeenCalledTimes(1);
+    });
+
+    it("calls onStore after storing a response", async () => {
+      const onStore = vi.fn();
+      const deja = new DejaLLM({ ...makeConfig(embedding, exactCache, vectorStore, embeddingCache), hooks: { onStore } });
+      await deja.store([{ role: "user", content: "What is 2+2?" }], "4");
+      expect(onStore).toHaveBeenCalledTimes(1);
+      expect(onStore.mock.calls[0][0].layer).toBe(false);
+    });
+
+    it("does not call onHit on a miss", async () => {
+      const onHit = vi.fn();
+      const deja = new DejaLLM({ ...makeConfig(embedding, exactCache, vectorStore, embeddingCache), hooks: { onHit } });
+      await deja.check([{ role: "user", content: "Unknown?" }]);
+      expect(onHit).not.toHaveBeenCalled();
+    });
+
+    it("does not call onMiss on a hit", async () => {
+      const onMiss = vi.fn();
+      const deja = new DejaLLM({ ...makeConfig(embedding, exactCache, vectorStore, embeddingCache), hooks: { onMiss } });
+      const messages = [{ role: "user" as const, content: "What is 2+2?" }];
+      await deja.store(messages, "4");
+      await deja.check(messages);
+      expect(onMiss).not.toHaveBeenCalled();
+    });
+  });
 });

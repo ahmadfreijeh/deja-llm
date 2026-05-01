@@ -12,7 +12,10 @@ export type {
   ExactCache,
   CacheResult,
   Logger,
+  Hooks,
   DejaLLMConfig,
 } from "./types.js";
+
+export type { StatsSnapshot } from "./Stats.js";
 
 export { DejaValidationError } from "./types.js";

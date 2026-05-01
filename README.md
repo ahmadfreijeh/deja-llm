@@ -174,6 +174,12 @@ const deja = new DejaLLM({
   threshold: 0.92,     // semantic similarity threshold, default 0.92
   failSilently: true,  // on cache errors, fall through silently — default true
   logger: console,     // any object with debug/warn/error methods
+
+  hooks: {
+    onHit(result) { /* fired on cache hit */ },
+    onMiss() { /* fired on cache miss */ },
+    onStore(result) { /* fired after store() */ },
+  },
 });
 ```
 
@@ -195,6 +201,54 @@ const deja = new DejaLLM({
   // ...
 });
 ```
+
+---
+
+## Stats
+
+`deja-llm` tracks hit/miss counters in memory for the lifetime of the current process. Counters reset on every restart and are not shared across multiple instances.
+
+```ts
+const snap = deja.stats();
+// {
+//   requests: 42,
+//   hits: { exact: 18, semantic: 11, miss: 13 },
+//   hitRate: 69,           // percentage, 0–100
+//   estimatedUSDSaved: 0.0031
+// }
+
+deja.resetStats(); // reset all counters to zero
+```
+
+> `stats()` is a lightweight convenience for local development and quick sanity checks — not a production metrics solution. For persistent, aggregated observability use the hooks below to push events wherever you want.
+
+---
+
+## Hooks
+
+Hooks let you plug into cache events for logging, metrics, or alerting:
+
+```ts
+const deja = new DejaLLM({
+  // ...
+  hooks: {
+    onHit(result) {
+      // fired on exact or semantic cache hit
+      console.log(`Cache hit [${result.layer}] — saved ~$${result.savings.estimatedUSD}`);
+    },
+    onMiss() {
+      // fired when both layers miss
+      console.log("Cache miss — falling through to LLM");
+    },
+    onStore(result) {
+      // fired after store() completes
+      console.log(`Stored in ${result.latency.writeBack}ms`);
+    },
+  },
+});
+```
+
+The `result` passed to `onHit` and `onStore` is the full `CacheResult` object described above.
 
 ---
 
